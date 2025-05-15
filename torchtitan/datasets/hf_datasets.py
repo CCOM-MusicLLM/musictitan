@@ -18,8 +18,8 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
-
-
+from torchtitan.datasets.mmaxind_dset_mega import IndexedDataset
+SEMANTIC_PAD_TOKEN_ID = 128004
 def _load_c4_dataset(dataset_path: str):
     """Load C4 dataset with default configuration."""
     return load_dataset(dataset_path, name="en", split="train", streaming=True)
@@ -171,3 +171,160 @@ def build_hf_dataloader(
         dp_world_size=dp_world_size,
         batch_size=batch_size,
     )
+
+def split_torch_dataset(dataset, rank, world_size):
+    """
+    为 torch.utils.data.Dataset 实现简单的分片功能
+    
+    Args:
+        dataset: torch.utils.data.Dataset 实例
+        rank: 当前进程的排名
+        world_size: 总进程数
+    
+    Returns:
+        分片后的数据集
+    """
+    if world_size == 1:
+        return dataset
+    
+    # 创建一个包装类来实现分片
+    class ShardedDataset(torch.utils.data.Dataset):
+        def __init__(self, dataset, rank, world_size):
+            self.dataset = dataset
+            self.rank = rank
+            self.world_size = world_size
+            
+            # 计算当前分片的数据范围
+            self.dataset_size = len(dataset)
+            self.shard_size = self.dataset_size // world_size
+            self.remainder = self.dataset_size % world_size
+            
+            # 处理不能整除的情况
+            if rank < self.remainder:
+                self.start_idx = rank * (self.shard_size + 1)
+                self.end_idx = self.start_idx + self.shard_size + 1
+            else:
+                self.start_idx = rank * self.shard_size + self.remainder
+                self.end_idx = self.start_idx + self.shard_size
+        
+        def __len__(self):
+            return self.end_idx - self.start_idx
+        
+        def __getitem__(self, idx):
+            if idx < 0 or idx >= len(self):
+                raise IndexError(f"Index {idx} out of bounds for dataset of size {len(self)}")
+            return self.dataset[self.start_idx + idx]
+    
+    return ShardedDataset(dataset, rank, world_size)
+
+class MusicTokenDataset(IterableDataset, Stateful):
+    def __init__(
+        self,
+        dataset_path: str | None,
+        seq_len: int = 2048,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = False,
+    ) -> None:
+        # Force lowercase for consistent comparison
+
+        ds = IndexedDataset(dataset_path)
+        self.dataset_path = dataset_path
+        self._data = split_torch_dataset(ds, dp_rank, dp_world_size)
+        self.seq_len = seq_len
+        self.infinite = infinite
+
+        # Variables for checkpointing
+        self._sample_idx = 0
+        self._all_tokens = torch.tensor([], dtype=torch.long)  # 使用空张量替代列表
+
+    def _get_data_iter(self):
+        if isinstance(self._data, Dataset) and self._sample_idx == len(self._data):
+            return iter([])
+
+        it = iter(self._data)
+        for _ in range(self._sample_idx):
+            next(it)
+        return it
+
+    def __iter__(self):
+        max_buffer_token_len = 1 + self.seq_len
+
+        while True:
+            for sample in self._get_data_iter():
+                sample = torch.from_numpy(sample).to(self._all_tokens)
+                sample = torch.cat([sample, torch.tensor([-1]).to(sample)]) #Important: we add -1 to make the data length to 8193
+                # print(sample.shape)
+                self._all_tokens = torch.cat([self._all_tokens, sample])
+                self._sample_idx += 1
+
+                while len(self._all_tokens) >= max_buffer_token_len:
+                    # print(len(self._all_tokens) )
+                    x = self._all_tokens[:max_buffer_token_len]
+                    # update tokens to the remaining tokens
+                    self._all_tokens = self._all_tokens[max_buffer_token_len:]
+                    input = x[:-1].clone()
+                    input[input==-1] = SEMANTIC_PAD_TOKEN_ID
+                    label = x[1:]
+                    yield {"input": input}, label
+
+            if not self.infinite:
+                logger.warning(f"Dataset {self.dataset_path} has run out of data")
+                break
+            else:
+                # Reset offset for the next iteration
+                self._sample_idx = 0
+                logger.warning(f"Dataset {self.dataset_path} is being re-looped")
+
+    def load_state_dict(self, state_dict):
+        self._sample_idx = state_dict["sample_idx"]
+        if isinstance(state_dict["token_buffer"], list):
+            self._all_tokens = torch.tensor(state_dict["token_buffer"], dtype=torch.long)
+        else:
+            self._all_tokens = state_dict["token_buffer"]
+
+    def state_dict(self):
+        return {"token_buffer": self._all_tokens.tolist(), "sample_idx": self._sample_idx}
+    
+def build_music_dataloader(
+    dp_world_size: int,
+    dp_rank: int,
+    tokenizer: Tokenizer,
+    job_config: JobConfig,
+    infinite: bool = True,
+) -> ParallelAwareDataloader:
+    """Build a data loader for HuggingFace datasets."""
+    dataset_name = job_config.training.dataset
+    dataset_path = job_config.training.dataset_path
+    batch_size = job_config.training.batch_size
+    seq_len = job_config.training.seq_len
+    logger.info(f"dataset_name: {dataset_name}, dataset_path: {dataset_path}, batch_size: {batch_size}, seq_len: {seq_len}, infinite: {infinite}")
+                
+    music_ds = MusicTokenDataset(
+        dataset_path=dataset_path,
+        seq_len=seq_len,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        infinite=infinite,
+    )
+
+    return ParallelAwareDataloader(
+        dataset=music_ds,
+        dp_rank=dp_rank,
+        dp_world_size=dp_world_size,
+        batch_size=batch_size,
+    )
+
+
+if __name__ == '__main__':
+    test_music_ds = MusicTokenDataset(
+        dataset_path="/2214/dongyuanliang/Megatron-latest/merged/valid_filter0_full_megaVQ01AcousFirst_padded8192",
+        seq_len=8192,
+        dp_rank=0,
+        dp_world_size=1600,
+        infinite=False,
+    )
+    for inp, label in test_music_ds:
+        #print(inp['input'][-10:])
+        #print(label[-10:])
+        pass

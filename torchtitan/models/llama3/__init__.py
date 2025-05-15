@@ -9,7 +9,7 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.datasets.hf_datasets import build_hf_dataloader, build_music_dataloader
 from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
@@ -27,6 +27,26 @@ __all__ = [
 
 
 llama3_configs = {
+    "musicllama_110M": TransformerModelArgs(
+        dim=768,
+        n_layers=16,
+        n_heads=12,
+        n_kv_heads=4,
+        multiple_of=1024,
+        rope_theta=500000,
+        norm_eps=1e-6,
+        vocab_size=128000+8192+256,
+    ),
+    "musicllama_7B": TransformerModelArgs(
+        dim=4096,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        multiple_of=256,
+        rope_theta=500000,
+        norm_eps=1e-6,
+        vocab_size=128000+8192+256,
+    ),
     "debugmodel": TransformerModelArgs(
         dim=256, n_layers=6, n_heads=16, rope_theta=500000
     ),
@@ -77,7 +97,7 @@ register_train_spec(
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_hf_dataloader,
+        build_dataloader_fn=build_music_dataloader,
         build_tokenizer_fn=build_tiktoken_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )
