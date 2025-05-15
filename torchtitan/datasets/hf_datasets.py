@@ -378,7 +378,7 @@ if __name__ == '__main__':
         seq_len=8192,
         dp_rank=24,
         dp_world_size=48,
-        infinite=False,
+        infinite=True,
     )
     from tqdm import tqdm
     for inp, label in tqdm(test_music_ds):

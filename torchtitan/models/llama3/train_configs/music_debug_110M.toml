@@ -59,7 +59,7 @@ context_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = true
-folder = "checkpoint"
+folder = "music_debug_110M"
 interval = 500
 model_weights_only = false
 export_dtype = "float32"
