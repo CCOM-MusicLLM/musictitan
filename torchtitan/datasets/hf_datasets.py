@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 from typing import Any, Callable
-
+import bisect
 import torch
 
 from datasets import Dataset, load_dataset
@@ -217,20 +217,71 @@ def split_torch_dataset(dataset, rank, world_size):
     
     return ShardedDataset(dataset, rank, world_size)
 
+
+class ConcatIndexDataset(torch.utils.data.Dataset):
+    @staticmethod
+    def cumsum(sequence, sample_ratios):
+        r, s = [], 0
+        for e, ratio in zip(sequence, sample_ratios):
+            curr_len = int(ratio * len(e))
+            r.append(curr_len + s)
+            s += curr_len
+        return r
+
+    def __init__(self, datasets, sample_ratios=1):
+        super().__init__()
+        assert len(datasets) > 0, "datasets should not be an empty iterable"
+        self.datasets = list(datasets)
+        if isinstance(sample_ratios, int):
+            sample_ratios = [sample_ratios] * len(self.datasets)
+        self.sample_ratios = sample_ratios
+        self.cumulative_sizes = self.cumsum(self.datasets, sample_ratios)
+        self.real_sizes = [len(d) for d in self.datasets]
+
+    def __len__(self):
+        return self.cumulative_sizes[-1]
+
+    def __getitem__(self, idx):
+        dataset_idx, sample_idx = self._get_dataset_and_sample_index(idx)
+        return self.datasets[dataset_idx][sample_idx]
+
+    def _get_dataset_and_sample_index(self, idx: int):
+        dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+        if dataset_idx == 0:
+            sample_idx = idx
+        else:
+            sample_idx = idx - self.cumulative_sizes[dataset_idx - 1]
+        sample_idx = sample_idx % self.real_sizes[dataset_idx]
+        return dataset_idx, sample_idx
+
+
+
 class MusicTokenDataset(IterableDataset, Stateful):
     def __init__(
         self,
-        dataset_path: str | None,
+        dataset_name: str,
+        dataset_path: str | list[str] | None,
+        sample_ratios: int | list[float] = 1,
         seq_len: int = 2048,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
     ) -> None:
         # Force lowercase for consistent comparison
+        if isinstance(sample_ratios, list):
+            assert isinstance(dataset_path, list), "dataset_path should be a list when sample_ratios is a list"
+            assert len(sample_ratios) == len(dataset_path), "dataset_path and sample_ratios should have the same length"
+        if isinstance(dataset_path, list):
+            self.datasets = [IndexedDataset(path) for path in dataset_path]
+        else:
+            assert isinstance(dataset_path, str), "dataset_path should be a string or a list of strings"
+            self.datasets = [IndexedDataset(dataset_path)]
+        assert dataset_path is not None, "dataset_path should not be None"
 
-        ds = IndexedDataset(dataset_path)
-        self.dataset_path = dataset_path
-        self._data = split_torch_dataset(ds, dp_rank, dp_world_size)
+        self.dataset_name = dataset_name
+        self.concat_dataset = ConcatIndexDataset(self.datasets, sample_ratios)
+
+        self._data = split_torch_dataset(self.concat_dataset, dp_rank, dp_world_size)
         self.seq_len = seq_len
         self.infinite = infinite
 
@@ -269,12 +320,12 @@ class MusicTokenDataset(IterableDataset, Stateful):
                     yield {"input": input}, label
 
             if not self.infinite:
-                logger.warning(f"Dataset {self.dataset_path} has run out of data")
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
                 break
             else:
                 # Reset offset for the next iteration
                 self._sample_idx = 0
-                logger.warning(f"Dataset {self.dataset_path} is being re-looped")
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
@@ -296,12 +347,15 @@ def build_music_dataloader(
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
+    sample_ratios = job_config.training.dataset_sample_ratios
     batch_size = job_config.training.batch_size
     seq_len = job_config.training.seq_len
-    logger.info(f"dataset_name: {dataset_name}, dataset_path: {dataset_path}, batch_size: {batch_size}, seq_len: {seq_len}, infinite: {infinite}")
+    logger.info(f"dataset_name: {dataset_name}, dataset_path: {dataset_path}, sample_ratios: {sample_ratios}, batch_size: {batch_size}, seq_len: {seq_len}, infinite: {infinite}")
                 
     music_ds = MusicTokenDataset(
+        dataset_name=dataset_name,
         dataset_path=dataset_path,
+        sample_ratios=sample_ratios,
         seq_len=seq_len,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
@@ -318,13 +372,16 @@ def build_music_dataloader(
 
 if __name__ == '__main__':
     test_music_ds = MusicTokenDataset(
-        dataset_path="/2214/dongyuanliang/Megatron-latest/merged/valid_filter0_full_megaVQ01AcousFirst_padded8192",
+        dataset_name='train_1800w_2615',
+        dataset_path=["/2214/dongyuanliang/Megatron-latest/merged/valid_filter0_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/valid_filter1_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/valid_filter2_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/valid_filter3_full_megaVQ01AcousFirst_padded8192"],
+        sample_ratios=[2,6,1,5],
         seq_len=8192,
-        dp_rank=0,
-        dp_world_size=1600,
+        dp_rank=24,
+        dp_world_size=48,
         infinite=False,
     )
-    for inp, label in test_music_ds:
+    from tqdm import tqdm
+    for inp, label in tqdm(test_music_ds):
         #print(inp['input'][-10:])
         #print(label[-10:])
         pass

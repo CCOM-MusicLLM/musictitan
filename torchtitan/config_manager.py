@@ -183,10 +183,15 @@ class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
 
-    dataset_path: str | None = None
+    dataset_path: str | list[str] | None = None
     """
     Path to the dataset in the file system. If provided, data will be
     loaded from this path instead of downloaded.
+    """
+    dataset_sample_ratios: int | list[float] = 1
+    """
+    Sample ratios for each dataset. If provided, data will be sampled
+    according to the ratios.
     """
 
     batch_size: int = 8

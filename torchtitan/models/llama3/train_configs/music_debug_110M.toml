@@ -44,8 +44,9 @@ seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 180000
 compile = false
-dataset = "musicdataset"  # supported datasets: c4_test (2K), c4 (177M)\
-dataset_path = "/2214/dongyuanliang/Megatron-latest/merged/train_filter0_full_megaVQ01AcousFirst_padded8192"
+dataset = "train_1800w_2615"  # supported datasets: c4_test (2K), c4 (177M)\
+dataset_path = ["/2214/dongyuanliang/Megatron-latest/merged/train_filter0_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/train_filter1_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/train_filter2_full_megaVQ01AcousFirst_padded8192", "/2214/dongyuanliang/Megatron-latest/merged/train_filter3_full_megaVQ01AcousFirst_padded8192"]
+dataset_sample_ratios = [2,6,1,5]
 
 [parallelism]
 data_parallel_replicate_degree = 3
