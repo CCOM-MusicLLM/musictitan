@@ -63,6 +63,6 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 cd /2214/dongyuanliang/torchtitan
 # TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 /2214/conda_envs/torchtitan/bin/torchrun $DISTRIBUTED_ARGS \
--m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_debug_110M_unittest
+-m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_debug_110M_unittest_gradacc
 # --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 tail -f /dev/null
