@@ -316,14 +316,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.optimizers.zero_grad()
         
-        loss = 0.0 # running loss for display
+        losses = [] # running loss for display
         for _ in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
             cur_loss = self.train_step(inputs, labels) / grad_accum_steps
             cur_loss.backward()
             # cur_valid_token_count = labels.ne(-1).sum()
-            loss += cur_loss.detach().item()
+            losses.append(cur_loss.detach())
+        loss = torch.sum(torch.stack(losses)).to(self.device)
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
