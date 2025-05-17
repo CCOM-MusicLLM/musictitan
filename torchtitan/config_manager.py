@@ -196,6 +196,8 @@ class Training:
 
     batch_size: int = 8
     """Batch size"""
+    gradient_accumulation_steps: int = 1
+    """Gradient accumulation steps"""
 
     seq_len: int = 2048
     """Sequence length"""
