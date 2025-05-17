@@ -324,11 +324,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             batch_loss = self.train_step(inputs, labels).view(labels.shape) # [micro_batch_size, seq_len]
             batch_loss_mean = []
             for sample_loss, channel, label in zip(batch_loss, inputs['channel'], labels): # handle each sample's channel within a batch
-                sample_valid_token_count = label.ne(-1).sum()
+                sample_valid_token_count = label.ne(-1).sum().item()
                 sample_loss_mean = torch.sum(sample_loss) / sample_valid_token_count # for backward calculation, has gradient
                 batch_loss_mean.append(sample_loss_mean)
 
-                channel_loss_sum = sample_loss_mean.detach() * sample_valid_token_count # for channel loss display, no gradient
+                channel_loss_sum = sample_loss_mean.detach().item() * sample_valid_token_count # for channel loss display, no gradient
                 channel_item = channel.item()
                 if channel_item not in channel_loss_dict:
                     channel_loss_dict[channel_item] = [channel_loss_sum, sample_valid_token_count]
@@ -361,6 +361,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
+        extra_losses = {}
         if (
             parallel_dims.dp_replicate_enabled
             or parallel_dims.dp_shard_enabled
@@ -373,10 +374,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dist_utils.dist_mean(loss, world_mesh["dp_cp"], ft_pg),
                 dist_utils.dist_max(loss, world_mesh["dp_cp"], ft_pg),
             )
+            assert ft_pg is None, "fault tolerance not supported for global channel loss"
+            global_channel_loss = dist_utils.dist_dict(channel_loss_dict, world_mesh["dp_cp"])
+            merged_channel_loss = {}
+            for rnk in global_channel_loss:
+                for channel, (loss_sum, valid_token_count) in rnk.items():
+                    if channel not in merged_channel_loss:
+                        merged_channel_loss[channel] = [loss_sum, valid_token_count]
+                    else:
+                        merged_channel_loss[channel][0] += loss_sum
+                        merged_channel_loss[channel][1] += valid_token_count
+
         else:
             global_avg_loss = global_max_loss = loss.item()
+            merged_channel_loss = channel_loss_dict
+        global_total_tokens = sum([merged_channel_loss[x][1] for x in merged_channel_loss])
+        extra_losses["misc/global_valid_tokens"] = global_total_tokens
+        for channel, (loss_sum, valid_token_count) in merged_channel_loss.items():
+            avg_channel_loss = loss_sum / valid_token_count if valid_token_count > 0 else 0.0
+            extra_losses[f'loss_metrics/channel_loss_{channel}'] = avg_channel_loss
+            extra_losses[f'misc/channel_token_perc_{channel}'] = valid_token_count / global_total_tokens
+        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss, extra_metrics=extra_losses)
 
-        self.metrics_processor.log(self.step, global_avg_loss, global_max_loss)
 
 
     def train_step(self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor):

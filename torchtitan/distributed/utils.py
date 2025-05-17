@@ -19,7 +19,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
-
+from typing import Dict, Any, List, Union
 
 def _dist_reduce(
     x: torch.Tensor,
@@ -67,6 +67,35 @@ def dist_mean(
         x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
     )
 
+def dist_dict(
+    obj: Dict[Any, Any],
+    group: Union[dist.ProcessGroup, DeviceMesh],
+) -> List[Dict[Any, Any]]:
+    """
+    Gather a dictionary object from all ranks in the group.
+
+    Args:
+        obj (Dict[Any, Any]): Local dictionary on this rank.
+        group (ProcessGroup or DeviceMesh): Group over which to gather.
+
+    Returns:
+        List[Dict[Any, Any]]: One dict per rank.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError("Distributed is not initialized.")
+
+    # Resolve group and world size
+    if isinstance(group, DeviceMesh):
+        world_size = group.size()
+        group = group.get_group()  # get ProcessGroup
+    elif isinstance(group, dist.ProcessGroup):
+        world_size = dist.get_world_size(group)
+    else:
+        raise TypeError(f"Unsupported group type: {type(group)}")
+
+    gathered = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, obj, group=group)
+    return gathered
 
 def set_determinism(
     world_mesh: DeviceMesh | None,
