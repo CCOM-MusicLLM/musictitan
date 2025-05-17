@@ -243,7 +243,7 @@ class ConcatIndexDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         dataset_idx, sample_idx = self._get_dataset_and_sample_index(idx)
-        return self.datasets[dataset_idx][sample_idx]
+        return {'data': self.datasets[dataset_idx][sample_idx], 'channel': dataset_idx}
 
     def _get_dataset_and_sample_index(self, idx: int):
         dataset_idx = bisect.bisect_right(self.cumulative_sizes, idx)
@@ -302,8 +302,8 @@ class MusicTokenDataset(IterableDataset, Stateful):
         max_buffer_token_len = 1 + self.seq_len
 
         while True:
-            for sample in self._get_data_iter():
-                sample = torch.from_numpy(sample).to(self._all_tokens)
+            for sample_dict in self._get_data_iter():
+                sample = torch.from_numpy(sample_dict["data"]).to(self._all_tokens)
                 sample = torch.cat([sample, torch.tensor([-1]).to(sample)]) #Important: we add -1 to make the data length to 8193
                 # print(sample.shape)
                 self._all_tokens = torch.cat([self._all_tokens, sample])
@@ -317,7 +317,7 @@ class MusicTokenDataset(IterableDataset, Stateful):
                     input = x[:-1].clone()
                     input[input==-1] = SEMANTIC_PAD_TOKEN_ID
                     label = x[1:]
-                    yield {"input": input}, label
+                    yield {"input": input, "channel": sample_dict["channel"]}, label
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
@@ -380,8 +380,19 @@ if __name__ == '__main__':
         dp_world_size=48,
         infinite=True,
     )
+    test_music_dataloader = ParallelAwareDataloader(
+        dataset=test_music_ds,
+        dp_rank=24,
+        dp_world_size=48,
+        batch_size=5,
+    )
+    data_iterator = iter(test_music_dataloader)
+    batch = next(data_iterator)
+    print(batch)
+    exit(0)
     from tqdm import tqdm
     for inp, label in tqdm(test_music_ds):
-        #print(inp['input'][-10:])
+        print(inp['input'][:30])
+        print(inp['channel'])
         #print(label[-10:])
         pass

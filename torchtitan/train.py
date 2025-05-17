@@ -317,13 +317,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers.zero_grad()
         
         losses = [] # running loss for display
+        channel_loss_dict = {}
         for _ in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
-            cur_loss = self.train_step(inputs, labels) / grad_accum_steps
-            cur_loss.backward()
+            batch_loss = self.train_step(inputs, labels).view(labels.shape) # [micro_batch_size, seq_len]
+            batch_loss_mean = []
+            for sample_loss, channel, label in zip(batch_loss, inputs['channel'], labels): # handle each sample's channel within a batch
+                sample_valid_token_count = label.ne(-1).sum()
+                sample_loss_mean = torch.sum(sample_loss) / sample_valid_token_count # for backward calculation, has gradient
+                batch_loss_mean.append(sample_loss_mean)
+
+                channel_loss_sum = sample_loss_mean.detach() * sample_valid_token_count # for channel loss display, no gradient
+                channel_item = channel.item()
+                if channel_item not in channel_loss_dict:
+                    channel_loss_dict[channel_item] = [channel_loss_sum, sample_valid_token_count]
+                else:
+                    channel_loss_dict[channel_item][0] += channel_loss_sum
+                    channel_loss_dict[channel_item][1] += sample_valid_token_count
+            
+            batch_loss_mean = torch.stack(batch_loss_mean).mean()
+            batch_loss_for_backward = batch_loss_mean / grad_accum_steps #TODO: we currently consider "every sample's" weight the same, instead of "every token's"
+            batch_loss_for_backward.backward()
+            
+            # cur_loss = self.train_step(inputs, labels) / grad_accum_steps #TODO: we currently consider "every sample's" weight the same, instead of "every token's"
+            # cur_loss.backward()
             # cur_valid_token_count = labels.ne(-1).sum()
-            losses.append(cur_loss.detach())
+
+            losses.append(batch_loss_for_backward.detach()) # for general loss display, no gradient
         loss = torch.sum(torch.stack(losses)).to(self.device)
 
         dist_utils.clip_grad_norm_(
