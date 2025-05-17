@@ -316,14 +316,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.optimizers.zero_grad()
         
-        losses = []
+        loss = 0.0 # running loss for display
         for _ in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
-            cur_loss = self.train_step(inputs, labels).detach()
-            losses.append(cur_loss)
-        # average the loss across the grad_accum_steps
-        loss = torch.mean(torch.stack(losses)).to(self.device)
+            cur_loss = self.train_step(inputs, labels) / grad_accum_steps
+            cur_loss.backward()
+            # cur_valid_token_count = labels.ne(-1).sum()
+            loss += cur_loss.detach().item()
 
         dist_utils.clip_grad_norm_(
             [p for m in model_parts for p in m.parameters()],
@@ -411,7 +411,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
-                loss.backward()
+                # loss.backward()
         return loss
         # dist_utils.clip_grad_norm_(
         #     [p for m in model_parts for p in m.parameters()],
