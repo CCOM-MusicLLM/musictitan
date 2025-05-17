@@ -318,30 +318,51 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         
         losses = [] # running loss for display
         channel_loss_dict = {}
-        range_starts, range_ends = [], []
+        boundary_tensor = None
         if self.job_config.metrics.log_target_loss >= 0: # 0 for text, 1 for vq0, 2 for vq1, etc.
-            range_starts.append(0)
-            range_ends.append(self.job_config.model.text_token_cnt)
+            boundaries = [0, self.job_config.model.text_token_cnt]
             for n_q in range(self.job_config.metrics.log_target_loss):
-                range_starts.append(range_ends[-1])
-                range_ends.append(range_ends[-1] + self.job_config.model.audio_codebook_size)
+                boundaries.append(self.job_config.model.text_token_cnt + self.job_config.model.audio_codebook_size * (n_q+1))
+            boundary_tensor = torch.tensor(boundaries, device=self.device)
 
         for _ in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
             batch_loss = self.train_step(inputs, labels).view(labels.shape) # [micro_batch_size, seq_len]
 
-            for n_q, (start, end) in enumerate(zip(range_starts, range_ends)):
-                range_mask = (labels >= start) & (labels < end)
-                if range_mask.any():
-                    range_loss = batch_loss[range_mask].sum().item()
-                    range_valid_token_count = range_mask.sum().item()
-                    key_n_q = -n_q - 1 # -1 for text, -2 for vq 0, -3 for vq 1, etc.
-                    if key_n_q not in channel_loss_dict:
-                        channel_loss_dict[key_n_q] = [range_loss, range_valid_token_count]
-                    else:
-                        channel_loss_dict[key_n_q][0] += range_loss
-                        channel_loss_dict[key_n_q][1] += range_valid_token_count
+            if boundary_tensor is not None:
+                label_range_flat = torch.bucketize(labels, boundaries=boundary_tensor, right=True).view(-1) # [micro_batch_size, seq_len]
+                batch_loss_flat = batch_loss.view(-1).detach() 
+
+                range_losses = torch.zeros(len(boundaries)+1, device=self.device)
+                range_valid_token_count = torch.zeros(len(boundaries)+1, device=self.device)
+
+                range_losses.scatter_add_(0, label_range_flat, batch_loss_flat) # sum batch_loss according to label range to range_losses
+                range_valid_token_count.scatter_add_(0, label_range_flat, torch.ones_like(batch_loss_flat))
+
+                for range_id in range(1, len(boundaries)):
+                    n_q = range_id - 1
+                    cnt = range_valid_token_count[range_id].item()
+                    if cnt > 0:
+                        key_n_q = -n_q - 1 # -1 for text, -2 for vq 0, -3 for vq 1, etc.
+                        range_loss = range_losses[range_id].item()
+                        if key_n_q not in channel_loss_dict:
+                            channel_loss_dict[key_n_q] = [range_loss, cnt]
+                        else:
+                            channel_loss_dict[key_n_q][0] += range_loss
+                            channel_loss_dict[key_n_q][1] += cnt
+
+            # for n_q, (start, end) in enumerate(zip(range_starts, range_ends)):
+            #     range_mask = (labels >= start) & (labels < end)
+            #     if range_mask.any():
+            #         range_loss = batch_loss[range_mask].sum().item()
+            #         range_valid_token_count = range_mask.sum().item()
+            #         key_n_q = -n_q - 1 # -1 for text, -2 for vq 0, -3 for vq 1, etc.
+            #         if key_n_q not in channel_loss_dict:
+            #             channel_loss_dict[key_n_q] = [range_loss, range_valid_token_count]
+            #         else:
+            #             channel_loss_dict[key_n_q][0] += range_loss
+            #             channel_loss_dict[key_n_q][1] += range_valid_token_count
 
 
             batch_loss_mean = []
