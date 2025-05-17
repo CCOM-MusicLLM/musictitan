@@ -91,6 +91,9 @@ class Metrics:
     enable_wandb: bool = False
     """Whether to log metrics to Weights & Biases"""
 
+    log_target_loss: int = -1
+    """whether to log target loss. -1 means no target loss, 0 means text loss, 1 means vq0 loss, etc."""
+
 
 @dataclass
 class Model:
@@ -102,6 +105,10 @@ class Model:
 
     tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
     """Tokenizer path"""
+
+    text_token_cnt: int = 128256
+
+    audio_codebook_size: int = 1024
 
     converters: list[str] = field(default_factory=list)
     """

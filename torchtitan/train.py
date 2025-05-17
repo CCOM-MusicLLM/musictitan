@@ -318,17 +318,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         
         losses = [] # running loss for display
         channel_loss_dict = {}
+        range_starts, range_ends = [], []
+        if self.job_config.metrics.log_target_loss >= 0: # 0 for text, 1 for vq0, 2 for vq1, etc.
+            range_starts.append(0)
+            range_ends.append(self.job_config.model.text_token_cnt)
+            for n_q in range(self.job_config.metrics.log_target_loss):
+                range_starts.append(range_ends[-1])
+                range_ends.append(range_ends[-1] + self.job_config.model.audio_codebook_size)
+
         for _ in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
             batch_loss = self.train_step(inputs, labels).view(labels.shape) # [micro_batch_size, seq_len]
+
+            for n_q, (start, end) in enumerate(zip(range_starts, range_ends)):
+                range_mask = (labels >= start) & (labels < end)
+                if range_mask.any():
+                    range_loss = batch_loss[range_mask].sum().item()
+                    range_valid_token_count = range_mask.sum().item()
+                    key_n_q = -n_q - 1 # -1 for text, -2 for vq 0, -3 for vq 1, etc.
+                    if key_n_q not in channel_loss_dict:
+                        channel_loss_dict[key_n_q] = [range_loss, range_valid_token_count]
+                    else:
+                        channel_loss_dict[key_n_q][0] += range_loss
+                        channel_loss_dict[key_n_q][1] += range_valid_token_count
+
+
             batch_loss_mean = []
             for sample_loss, channel, label in zip(batch_loss, inputs['channel'], labels): # handle each sample's channel within a batch
                 sample_valid_token_count = label.ne(-1).sum().item()
                 sample_loss_mean = torch.sum(sample_loss) / sample_valid_token_count # for backward calculation, has gradient
                 batch_loss_mean.append(sample_loss_mean)
 
-                channel_loss_sum = sample_loss_mean.detach().item() * sample_valid_token_count # for channel loss display, no gradient
+                channel_loss_sum = sample_loss_mean.item() * sample_valid_token_count # for channel loss display, no gradient
                 channel_item = channel.item()
                 if channel_item not in channel_loss_dict:
                     channel_loss_dict[channel_item] = [channel_loss_sum, sample_valid_token_count]
@@ -388,12 +410,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_avg_loss = global_max_loss = loss.item()
             merged_channel_loss = channel_loss_dict
-        global_total_tokens = sum([merged_channel_loss[x][1] for x in merged_channel_loss])
+        
+        # some range may not be logged, so we use channels to calculate total tokens
+        global_total_tokens = sum([merged_channel_loss[x][1] for x in merged_channel_loss if x >= 0]) 
         extra_losses["misc/global_valid_tokens"] = global_total_tokens
         for channel, (loss_sum, valid_token_count) in merged_channel_loss.items():
-            avg_channel_loss = loss_sum / valid_token_count if valid_token_count > 0 else 0.0
-            extra_losses[f'loss_metrics/channel_loss_{channel}'] = avg_channel_loss
-            extra_losses[f'misc/channel_token_perc_{channel}'] = valid_token_count / global_total_tokens
+            if channel >= 0:
+                avg_channel_loss = loss_sum / valid_token_count if valid_token_count > 0 else 0.0
+                extra_losses[f'loss_metrics/channel_loss_{channel}'] = avg_channel_loss
+                extra_losses[f'misc/channel_token_perc_{channel}'] = valid_token_count / global_total_tokens
+            else:
+                n_q = -1 - channel
+                avg_channel_loss = loss_sum / valid_token_count if valid_token_count > 0 else 0.0
+                extra_losses[f'loss_metrics/target_loss_{n_q}'] = avg_channel_loss
+                extra_losses[f'misc/target_token_perc_{n_q}'] = valid_token_count / global_total_tokens
+
         self.metrics_processor.log(self.step, global_avg_loss, global_max_loss, extra_metrics=extra_losses)
 
 
