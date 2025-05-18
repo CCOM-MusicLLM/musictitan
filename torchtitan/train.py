@@ -325,9 +325,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 boundaries.append(self.job_config.model.text_token_cnt + self.job_config.model.audio_codebook_size * (n_q+1))
             boundary_tensor = torch.tensor(boundaries, device=self.device)
 
-        for _ in range(grad_accum_steps):
+        for ga_id in range(grad_accum_steps):
             inputs, labels = self.next_batch(data_iterator)
             # accumulate gradients for grad_accum_steps
+            for m in model_parts:
+                m.set_requires_gradient_sync(ga_id == grad_accum_steps - 1)
+                # m.set_requires_gradient_sync(True)
             batch_loss = self.train_step(inputs, labels).view(labels.shape) # [micro_batch_size, seq_len]
 
             if boundary_tensor is not None:
