@@ -504,7 +504,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                pred = model_parts[0](inputs)
+                pred = model_parts[0](inputs, input_batch=inputs[:, 0, ...])
                 loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred

@@ -56,6 +56,8 @@ llama3_configs = {
         rope_theta=500000,
         norm_eps=1e-6,
         vocab_size=128000+16384+256,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "debugmodel": TransformerModelArgs(
         dim=256, n_layers=6, n_heads=16, rope_theta=500000
