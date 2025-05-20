@@ -212,6 +212,8 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
+        self.q_layernorm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
+        self.k_layernorm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def init_weights(self, init_std: float):
@@ -245,6 +247,9 @@ class Attention(nn.Module):
         xq = xq.view(bs, seqlen, -1, self.head_dim)
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        xq = self.q_layernorm(xq)
+        xk = self.k_layernorm(xk)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 

@@ -72,7 +72,7 @@ context_parallel_degree = 1
 
 [checkpoint]
 enable_checkpoint = true
-folder = "music_bark_2dot5b_gb240_mb2_ga5_flexattn"
+folder = "music_bark_2dot5b_gb240_mb2_ga5_flexattn_qknorm"
 interval = 500
 model_weights_only = false
 export_dtype = "float32"
