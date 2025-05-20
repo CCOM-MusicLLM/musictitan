@@ -39,11 +39,13 @@ class TransformerModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+    pad_token_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         # self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
-        self.eos_id = tokenizer.eos_id
+        self.eos_id = job_config.model.eos_token_id
+        self.pad_token_id = job_config.model.pad_token_id
 
         if job_config.activation_checkpoint.mode == "selective" and self.use_flex_attn:
             raise ValueError(
@@ -398,6 +400,7 @@ class Transformer(nn.Module, ModelProtocol):
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
         self.eos_id = model_args.eos_id
+        self.pad_token_id = model_args.pad_token_id
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -487,7 +490,14 @@ class Transformer(nn.Module, ModelProtocol):
             )
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        if self.tok_embeddings: # tokens: [B, N_q-1, seq_len]
+            h = self.tok_embeddings(tokens)  # [B, N_q-1, seq_len, dim]
+            h[tokens==self.pad_token_id] = 0
+            h = h.sum(dim=1)  # [B, seq_len, dim]
+        else:
+            h = tokens
+
+        # h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis)

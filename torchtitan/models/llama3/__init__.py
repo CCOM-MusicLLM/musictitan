@@ -47,6 +47,16 @@ llama3_configs = {
         norm_eps=1e-6,
         vocab_size=128000+8192+256,
     ),
+    "musicllama_2dot5B": TransformerModelArgs(
+        dim=2304,
+        n_layers=40,
+        n_heads=36,
+        n_kv_heads=9,
+        multiple_of=256,
+        rope_theta=500000,
+        norm_eps=1e-6,
+        vocab_size=128000+16384+256,
+    ),
     "debugmodel": TransformerModelArgs(
         dim=256, n_layers=6, n_heads=16, rope_theta=500000
     ),

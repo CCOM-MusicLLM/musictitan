@@ -312,6 +312,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         world_mesh = self.world_mesh
         parallel_dims = self.parallel_dims
         assert not parallel_dims.pp_enabled, 'PP is not supported for gradient accumulation for now'
+        assert not parallel_dims.cp_enabled, 'CP is not supported for bark for now'
 
 
         self.optimizers.zero_grad()

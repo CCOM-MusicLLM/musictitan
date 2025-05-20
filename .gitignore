@@ -11,12 +11,13 @@ dist/*
 data
 out
 wandb
+washed_100w_tokens_randomized_seed1998_valid_seed4619_e607a58f_textaudio_trainval_split4_merged/
 
 torchtitan/datasets/**/*.model
 assets/**/*.model
 torchtitan/experiments/**/assets/*
 
 # temp files
-*.log
+*.log_*
 error.json
 _remote_module_non_scriptable.py

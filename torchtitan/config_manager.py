@@ -110,6 +110,14 @@ class Model:
 
     audio_codebook_size: int = 1024
 
+    total_nq: int = 16
+
+    pad_token_id: int = 128004
+
+    eol_token_id: int = 128255
+
+    eos_token_id: int = 128001
+
     converters: list[str] = field(default_factory=list)
     """
     Comma separated list of converters to apply to the model.
@@ -200,14 +208,18 @@ class Training:
     Sample ratios for each dataset. If provided, data will be sampled
     according to the ratios.
     """
+    pred_task_ratios: int | list[float] = 1
 
     batch_size: int = 8
     """Batch size"""
     gradient_accumulation_steps: int = 1
     """Gradient accumulation steps"""
 
-    seq_len: int = 2048
+    seq_len: int = 8192
     """Sequence length"""
+
+    bark_window_len: int = 1024
+    """Window length for bark upscaling"""
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
@@ -240,6 +252,12 @@ class Training:
 
     seed: int | None = None
     """Choose the base RNG seed used for training"""
+
+    target_seed: int = 1337
+    """Seed for dataset to sample a prediction task"""
+
+    window_seed: int = 1999
+    """Seed for dataset to crop the window from a long audio"""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""

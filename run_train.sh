@@ -49,7 +49,7 @@ export HF_HOME='/2214/huggingface'
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
 # NGPU=${NGPU:-"6"}
 
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/music_test_7b.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/music_bark_2dot5b.toml"}
 
 overrides=""
 if [ $# -ne 0 ]; then
@@ -63,6 +63,6 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 cd /2214/dongyuanliang/torchtitan
 # TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 /2214/conda_envs/torchtitan/bin/torchrun $DISTRIBUTED_ARGS \
--m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_test_7B_acoustic01
+-m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_bark_2dot5B
 # --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 tail -f /dev/null
