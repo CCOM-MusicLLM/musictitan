@@ -495,10 +495,20 @@ class Transformer(nn.Module, ModelProtocol):
             )
 
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        if self.tok_embeddings: # tokens: [B, N_q-1, seq_len]
-            h = self.tok_embeddings(tokens)  # [B, N_q-1, seq_len, dim]
-            h[tokens==self.pad_token_id] = 0
-            h = h.sum(dim=1)  # [B, seq_len, dim]
+        if self.tok_embeddings: # tokens: [B, N_q, seq_len]
+            vocab_embeds = self.tok_embeddings(tokens[:, 0]) # [B, seq_len, dim]
+            vocab_embeds[tokens[:, 0] == self.pad_token_id] = 0 # add only once
+
+            codebook_embeds = self.tok_embeddings(tokens[:, 1:]) # [B, N_q-1, T, D]
+            codebook_embeds[tokens[:, 1:] == 0] = 0 # set padding embedding to zero
+            codebook_embeds = codebook_embeds.sum(dim=1) # [B, T, D]
+            codebook_embeds[tokens[:, 0] != self.pad_token_id] = 0
+
+            h = vocab_embeds + codebook_embeds
+            
+            # h = self.tok_embeddings(tokens)  # [B, N_q, seq_len, dim]
+            # h[tokens==self.pad_token_id] = 0
+            # h = h.sum(dim=1)  # [B, seq_len, dim]
         else:
             h = tokens
 

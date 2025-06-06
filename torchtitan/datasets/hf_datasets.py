@@ -258,12 +258,25 @@ class ConcatIndexDataset(torch.utils.data.Dataset):
         return dataset_idx, sample_idx
 
 class RandomTargetWrapper(torch.utils.data.Dataset):
-    def __init__(self, dataset, target_sampler, window_sampler, max_seq_len, window_len):
+    def __init__(self, 
+                 dataset, 
+                 pred_task_ratio, 
+                 max_input_len, 
+                 window_len, 
+                 eos_token_id, 
+                 eol_token_id, 
+                 pad_token_id, 
+                 loss_ignore_idx):
+        
         self.dataset = dataset
-        self.target_sampler = target_sampler # sample an integer between [0, audio_nq)]
-        self.window_sampler = window_sampler # sample a float proportion between [0, 1)
-        self.max_seq_len = max_seq_len
+        self.pred_task_ratio = pred_task_ratio # has been normalized to sum to 1
+        self.max_input_len = max_input_len # max input length for model, i.e, 8192
         self.window_len = window_len
+
+        self.eos_token_id = eos_token_id
+        self.eol_token_id = eol_token_id
+        self.pad_token_id = pad_token_id
+        self.loss_ignore_idx = loss_ignore_idx
 
     def __len__(self):
         return len(self.dataset)
@@ -274,61 +287,69 @@ class RandomTargetWrapper(torch.utils.data.Dataset):
         text_len = sample_meta_len[1]
         audio_len = sample_meta_len[2]
         audio_nq = sample_meta_len[3]
-        # print(songid, text_len, audio_len, audio_nq)
 
-        sample_target = self.target_sampler() # vq0, 1, ... 15
-        assert sample_target >= 0 and sample_target < audio_nq, f"sample_target {sample_target} out of range"
+        text_buffer = torch.from_numpy(self.dataset.get(idx, 4, text_len)).clone() # text tokens, shape: [text_len]
 
-        segment_start = 0
-        if sample_target == 0:
-            if text_len + audio_len >= self.max_seq_len:
-                needed_buffer = self.dataset.get(idx, 4, text_len + (self.max_seq_len - text_len) * audio_nq) # truncated audio
-            else:
-                needed_buffer = self.dataset.get(idx, 4) # whole audio, we will add a eos token
-
-            needed_buffer = torch.from_numpy(needed_buffer)
-            text_buffer = needed_buffer[:text_len]
-            audio_buffer = needed_buffer[text_len:].view(-1, audio_nq)
+        sampled_idx = random.choices(range(len(self.pred_task_ratio)), weights=self.pred_task_ratio, k=1)[0]
+        if sampled_idx == 0:
+            read_len = min(audio_len, self.max_input_len - text_len + 5) # we read a bit more to ensure we have enough audio tokens
+            audio_buffer = self.dataset.get(idx, 4+text_len, read_len * audio_nq)
+            audio_buffer = torch.from_numpy(audio_buffer).view(-1, audio_nq).t() # audio tokens, shape: [audio_nq, read_len]
+            data_whole_vq0 = torch.cat([text_buffer, audio_buffer[0], torch.tensor([self.eos_token_id]).to(torch.long)])
+            _input = torch.zeros((audio_nq, len(data_whole_vq0)), dtype=torch.long)
+            _input[0] = data_whole_vq0
+            return {'songid': songid, 'tokens': _input, 'labels': data_whole_vq0, 'target_vq': 0, 'segment_start': 0}
         else:
-            if audio_len <= self.window_len:
-                needed_buffer = self.dataset.get(idx, 4) # whole audio
-                needed_buffer = torch.from_numpy(needed_buffer)
-                text_buffer = needed_buffer[:text_len]
-                audio_buffer = needed_buffer[text_len:].view(-1, audio_nq)
+            text_buffer[-1] = self.eol_token_id - sampled_idx
+            start_idx = 0
+            if audio_len > self.window_len:
+                start_idx = random.randint(0, audio_len - self.window_len)
+                audio_buffer = self.dataset.get(idx, 4+text_len+start_idx*audio_nq, self.window_len * audio_nq) # audio tokens, shape: [window_len, audio_nq]
             else:
-                text_buffer = torch.from_numpy(self.dataset.get(idx, 4, text_len)) # we need to get text first
-                p = self.window_sampler()
-                segment_start = min(round((audio_len - self.window_len) * p), audio_len - self.window_len)
-                audio_buffer = self.dataset.get(idx, 4+text_len+segment_start*audio_nq, self.window_len * audio_nq)
-                audio_buffer = torch.from_numpy(audio_buffer).view(-1, audio_nq)
-        target_buffer = audio_buffer[:, :sample_target+1].t().contiguous()
-        return {'songid': songid, 'text_tokens': text_buffer, 'audio_tokens': target_buffer, 'target_vq': sample_target, 'segment_start': segment_start}
+                audio_buffer = self.dataset.get(idx, 4+text_len, audio_len * audio_nq) # audio tokens, shape: [audio_len, audio_nq]
+            
+            audio_buffer = torch.from_numpy(audio_buffer).view(-1, audio_nq).t()
+            condition_audio = audio_buffer[:sampled_idx]
+            target_audio = audio_buffer[sampled_idx]
+
+            final_buffer = torch.zeros((audio_nq, text_len + len(target_audio) * 2 + 1), device=text_buffer.device, dtype=torch.long)
+            final_buffer[0, :text_len] = text_buffer
+            final_buffer[0, text_len:text_len + len(target_audio)] = self.pad_token_id
+            final_buffer[0, text_len + len(target_audio):-1] = target_audio
+            final_buffer[0, -1] = self.eos_token_id
+            final_buffer[1:sampled_idx+1, text_len:text_len + len(target_audio)] = condition_audio
+            
+            _label = final_buffer[0].clone()
+            _label[:text_len + len(target_audio)] = self.loss_ignore_idx # we only predict target vq (at last length of trunc)
+            _label[-1] = self.loss_ignore_idx # we dont need to predict the last [eos] while upscaling
+            
+            return {'songid': songid, 'tokens': final_buffer, 'labels': _label, 'target_vq': sampled_idx, 'segment_start': start_idx}
 
     
-def make_samplers(
-    rank: int,
-    target_ratios: int | list[float] = 1,
-    total_nq: int = 16,
-    target_seed: int = 1337,
-    window_seed: int = 1999
-):
-    target_rng = random.Random(target_seed + rank)
-    window_rng = random.Random(window_seed + rank)
-    if isinstance(target_ratios, int):
-        def target_sampler():
-            return target_rng.randint(0, total_nq-1)
-    else:
-        assert len(target_ratios) == total_nq, "target_ratios must have the same length as total_nq"
-        sum_probs = sum(target_ratios)
-        target_ratios = [i/sum_probs for i in target_ratios]
-        choices = list(range(total_nq))
-        def target_sampler():
-            return target_rng.choices(choices, weights=target_ratios, k=1)[0]
+# def make_samplers(
+#     rank: int,
+#     target_ratios: int | list[float] = 1,
+#     total_nq: int = 16,
+#     target_seed: int = 1337,
+#     window_seed: int = 1999
+# ):
+#     target_rng = random.Random(target_seed + rank)
+#     window_rng = random.Random(window_seed + rank)
+#     if isinstance(target_ratios, int):
+#         def target_sampler():
+#             return target_rng.randint(0, total_nq-1)
+#     else:
+#         assert len(target_ratios) == total_nq, "target_ratios must have the same length as total_nq"
+#         sum_probs = sum(target_ratios)
+#         target_ratios = [i/sum_probs for i in target_ratios]
+#         choices = list(range(total_nq))
+#         def target_sampler():
+#             return target_rng.choices(choices, weights=target_ratios, k=1)[0]
 
-    def window_sampler():
-        return window_rng.random()
+#     def window_sampler():
+#         return window_rng.random()
 
-    return target_sampler, window_sampler
+#     return target_sampler, window_sampler
 
 
 class MusicTokenDataset(IterableDataset, Stateful):
@@ -341,36 +362,35 @@ class MusicTokenDataset(IterableDataset, Stateful):
         total_nq: int = 16,
         target_seed: int = 1337,
         window_seed: int = 1999,
-        pad_token_id: int = -1,
-        eol_token_id: int = -1,
         eos_token_id: int = -1,
+        eol_token_id: int = -1,
+        pad_token_id: int = -1,
         seq_len: int = 8192,
         bark_window_len: int = 1024,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        loss_ignore_idx: int = -1,
     ) -> None:
         
         self.seq_len = seq_len
         self.bark_window_len = bark_window_len
         self.total_nq = total_nq
 
-        self.pad_token_id = pad_token_id
-        self.eol_token_id = eol_token_id
-        self.eos_token_id = eos_token_id
+        sum_probs = sum(target_ratios)
+        target_ratios = [i/sum_probs for i in target_ratios]
 
         self.infinite = infinite
-        max_buffer_token_len = 1 + self.seq_len
-        target_sampler, window_sampler = make_samplers(dp_rank, target_ratios, total_nq, target_seed, window_seed)
+        self.loss_ignore_idx = loss_ignore_idx
         # Force lowercase for consistent comparison
         if isinstance(sample_ratios, list):
             assert isinstance(dataset_path, list), "dataset_path should be a list when sample_ratios is a list"
             assert len(sample_ratios) == len(dataset_path), "dataset_path and sample_ratios should have the same length"
         if isinstance(dataset_path, list):
-            self.datasets = [RandomTargetWrapper(IndexedDataset(path), target_sampler, window_sampler, max_buffer_token_len, self.bark_window_len) for path in dataset_path]
+            self.datasets = [RandomTargetWrapper(IndexedDataset(path), target_ratios, seq_len, self.bark_window_len, eos_token_id, eol_token_id, pad_token_id, loss_ignore_idx) for path in dataset_path]
         else:
             assert isinstance(dataset_path, str), "dataset_path should be a string or a list of strings"
-            self.datasets = [RandomTargetWrapper(IndexedDataset(dataset_path), target_sampler, window_sampler, max_buffer_token_len, self.bark_window_len)]
+            self.datasets = [RandomTargetWrapper(IndexedDataset(dataset_path), target_ratios, seq_len, self.bark_window_len, eos_token_id, eol_token_id, pad_token_id, loss_ignore_idx)]
         assert dataset_path is not None, "dataset_path should not be None"
 
         self.dataset_name = dataset_name
@@ -395,48 +415,48 @@ class MusicTokenDataset(IterableDataset, Stateful):
             next(it)
         return it
     
-    def assemble_2d_input(self, raw_data_dict):
-        target_vq = raw_data_dict['target_vq']
-        audio_tokens = raw_data_dict['audio_tokens'] # shape: [target_vq+1, audio_len]
-        audio_len = audio_tokens.shape[1]
-        text_tokens= raw_data_dict['text_tokens'] # shape: [text_len]
-        text_len = text_tokens.shape[0]
-        if target_vq == 0:
-            final_len = text_len + audio_len
-        else:
-            final_len = text_len + audio_len * 2
-        final_2d_input = torch.full((self.total_nq-1, final_len+1), self.pad_token_id, dtype=torch.long) # we add an [eos] after input
-        final_2d_input[0, :text_len] = text_tokens
-        if target_vq != 0:
-            final_2d_input[0, text_len] = self.eol_token_id - target_vq  # IMPORTANT! we drop the last token of text <begin_of_audio>, i.e, <python_tag>, replace it with a task identifier
-            final_2d_input[:target_vq, text_len:text_len+audio_len] = audio_tokens[:target_vq, :]
-            final_2d_input[0, text_len+audio_len:-1] = audio_tokens[target_vq, :]
-            final_2d_input[0, -1] = self.eos_token_id
-            final_1d_label = final_2d_input[0].clone()
-            final_1d_label[text_len-1:text_len + audio_len] = -1 # we can't predict audio condition, but we can predict others.
-            final_1d_label[-1] = -1 # we dont need to predict the last [eos] while upscaling
-        else:
-            final_2d_input[0, text_len:-1] = audio_tokens[0]
-            final_2d_input[0, -1] = self.eos_token_id
-            final_1d_label = final_2d_input[0].clone()  # [seq_len]
-        # print(final_2d_input)
-        # print(final_1d_label)
-        # print(final_1d_label.shape, target_vq, raw_data_dict['songid'], text_len)
-        return final_2d_input, final_1d_label
+    # def assemble_2d_input(self, raw_data_dict):
+    #     target_vq = raw_data_dict['target_vq']
+    #     audio_tokens = raw_data_dict['audio_tokens'] # shape: [target_vq+1, audio_len]
+    #     audio_len = audio_tokens.shape[1]
+    #     text_tokens= raw_data_dict['text_tokens'] # shape: [text_len]
+    #     text_len = text_tokens.shape[0]
+    #     if target_vq == 0:
+    #         final_len = text_len + audio_len
+    #     else:
+    #         final_len = text_len + audio_len * 2
+    #     final_2d_input = torch.full((self.total_nq-1, final_len+1), self.pad_token_id, dtype=torch.long) # we add an [eos] after input
+    #     final_2d_input[0, :text_len] = text_tokens
+    #     if target_vq != 0:
+    #         final_2d_input[0, text_len-1] = self.eol_token_id - target_vq  # IMPORTANT! we drop the last token of text <begin_of_audio>, i.e, <python_tag>, replace it with a task identifier
+    #         final_2d_input[:target_vq, text_len:text_len+audio_len] = audio_tokens[:target_vq, :]
+    #         final_2d_input[0, text_len+audio_len:-1] = audio_tokens[target_vq, :]
+    #         final_2d_input[0, -1] = self.eos_token_id
+    #         final_1d_label = final_2d_input[0].clone()
+    #         final_1d_label[text_len-1:text_len + audio_len] = -1 # we can't predict audio condition, but we can predict others.
+    #         final_1d_label[-1] = -1 # we dont need to predict the last [eos] while upscaling
+    #     else:
+    #         final_2d_input[0, text_len:-1] = audio_tokens[0]
+    #         final_2d_input[0, -1] = self.eos_token_id
+    #         final_1d_label = final_2d_input[0].clone()  # [seq_len]
+    #     # print(final_2d_input)
+    #     # print(final_1d_label)
+    #     # print(final_1d_label.shape, target_vq, raw_data_dict['songid'], text_len)
+    #     return final_2d_input, final_1d_label
         
     def __iter__(self):
 
         while True:
             for sample_dict in self._get_data_iter():
-                sample, label = self.assemble_2d_input(sample_dict) # shape: [total_nq-1, final_len]
-                self.all_2d_input = torch.cat([self.all_2d_input, sample], dim=1) #TODO: accelerate this: use python list.append() instead of torch.cat()
-                self.all_1d_label = torch.cat([self.all_1d_label, label])
+                # sample, label = self.assemble_2d_input(sample_dict) # shape: [total_nq-1, final_len]
+                self.all_2d_input = torch.cat([self.all_2d_input, sample_dict['tokens']], dim=1) #TODO: accelerate this: use python list.append() instead of torch.cat()
+                self.all_1d_label = torch.cat([self.all_1d_label, sample_dict['labels']])
                 self._sample_idx += 1
 
                 if self.all_1d_label.shape[0] >= self.seq_len:
                     # clear the cache buffer
                     if self.all_1d_label.shape[0] == self.seq_len:
-                        label_buffer = torch.cat([self.all_1d_label, torch.tensor([-1]).to(self.all_1d_label)]) 
+                        label_buffer = torch.cat([self.all_1d_label, torch.tensor([self.loss_ignore_idx]).to(self.all_1d_label)]) 
                     else:
                         label_buffer = self.all_1d_label
                     yield {"input": self.all_2d_input[:, :self.seq_len], "channel": sample_dict["channel"]}, label_buffer[1:self.seq_len+1]
@@ -474,9 +494,9 @@ def build_music_dataloader(
     total_nq = job_config.model.total_nq
     target_seed = job_config.training.target_seed
     window_seed = job_config.training.window_seed
-    pad_token_id = job_config.model.pad_token_id
-    eol_token_id = job_config.model.eol_token_id
     eos_token_id = job_config.model.eos_token_id
+    eol_token_id = job_config.model.eol_token_id
+    pad_token_id = job_config.model.pad_token_id
     bark_window_len = job_config.training.bark_window_len
     batch_size = job_config.training.batch_size
     seq_len = job_config.training.seq_len
@@ -490,9 +510,9 @@ def build_music_dataloader(
         total_nq=total_nq,
         target_seed=target_seed,
         window_seed=window_seed,
-        pad_token_id=pad_token_id,
-        eol_token_id=eol_token_id,
         eos_token_id=eos_token_id,
+        eol_token_id=eol_token_id,
+        pad_token_id=pad_token_id,
         seq_len=seq_len,
         bark_window_len=bark_window_len,
         dp_rank=dp_rank,

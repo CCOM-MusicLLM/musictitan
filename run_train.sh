@@ -41,6 +41,8 @@ echo "NODE_RANK=${NODE_RANK}"
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT --rdzv_id=pytorchddp --rdzv_backend=c10d --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} --local-ranks-filter ${LOG_RANK} --role rank"
 
 cat /2214/wandb.netrc > /root/.netrc
+export WANDB_MODE=offline
+
 export TORCH_HOME='/2214/torch'
 export HF_HOME='/2214/huggingface'
 
@@ -63,6 +65,6 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 cd /2214/dongyuanliang/torchtitan
 # TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 /2214/conda_envs/torchtitan/bin/torchrun $DISTRIBUTED_ARGS \
--m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_bark_2dot5B
+-m torchtitan.train --job.config_file ${CONFIG_FILE} $overrides 2>&1 | tee -a run_${NODE_RANK}.log_music_bark_2dot5B_fixdatasampler
 # --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 tail -f /dev/null
